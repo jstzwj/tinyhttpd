@@ -2,8 +2,26 @@
 #include <cstring>
 #include <cstdlib>
 #include <cstdint>
+#include <map>
+#include <vector>
+#include <utility>
 #include <string>
+#include <memory>
 #include <uv.h>
+
+
+
+inline std::string getHttpHeader(std::uint16_t status_code, std::string status, std::vector<std::pair<std::string, std::string>> headers)
+{
+    std::string response;
+    response += "HTTP/1.1 " + std::to_string(status_code) + " " + status + "\r\n";
+    for(const auto& each_pair: headers)
+    {
+        response += each_pair.first + ": " + each_pair.second + "\r\n";
+    }
+    return response;
+}
+
 
 
 class HttpServer
@@ -12,6 +30,11 @@ private:
     uv_loop_t* loop;
     uv_tcp_t server;
     struct sockaddr_in addr;
+
+    inline static std::map<int, std::string> status_code{
+        {200, "OK"},
+        {404, "Not Found"}
+    };
 public:
     HttpServer(const char* ip, std::uint16_t port)
     {
@@ -29,60 +52,68 @@ public:
         }
     }
 
+    static void free_handle(uv_handle_t* handle) {
+        delete handle;
+    }
+
     static void on_new_connection(uv_stream_t* server, int status) {
         uv_loop_t* loop = uv_default_loop();
-        printf("New connection \n");
         if (status < 0) {
             fprintf(stderr, "New connection error %s\n", uv_strerror(status));
             return;
         }
 
-        uv_tcp_t* client = (uv_tcp_t*)malloc(sizeof(uv_tcp_t));
+        uv_tcp_t* client = new uv_tcp_t;
         uv_tcp_init(loop, client);
         if (uv_accept(server, (uv_stream_t*)client) == 0) {
-            uv_read_start((uv_stream_t*)client, alloc_buffer, echo_read);
+            uv_read_start((uv_stream_t*)client, alloc_buffer, read_cb);
         }
         else
         {
-            uv_close((uv_handle_t*)client, NULL);
+            uv_close((uv_handle_t*)client, free_handle);
         }
     }
 
     static void alloc_buffer(uv_handle_t* handle, size_t suggested_size, uv_buf_t* buf) {
-        buf->base = (char*)malloc(suggested_size);
+        buf->base = new char[suggested_size];
         buf->len = suggested_size;
     }
 
-    static void echo_write(uv_write_t* req, int status) {
+    static void write_cb(uv_write_t* req, int status) {
         if (status) {
             fprintf(stderr, "Write error %s\n", uv_strerror(status));
         }
-        free(req);
+        delete[] req->data;
+        delete req;
     }
 
-    static void echo_read(uv_stream_t* client, ssize_t nread, const uv_buf_t* buf) {
+    static void read_cb(uv_stream_t* client, ssize_t nread, const uv_buf_t* buf) {
         if (nread < 0) {
             if (nread != UV_EOF) {
                 fprintf(stderr, "Read error %s\n", uv_err_name(nread));
-                uv_close((uv_handle_t*)client, NULL);
+                uv_close((uv_handle_t*)client, free_handle);
             }
         }
         else if (nread > 0) {
-            uv_write_t* req = (uv_write_t*)malloc(sizeof(uv_write_t));
-            std::string ret_str = "HTTP/1.1 200 OK\r\n" \
-                "Content-Type: text/plain\r\n" \
-                "Content-Length: 14\r\n" \
-                "\r\n"\
-                "Hello, World!\n";
-            char* ret = (char*)malloc(ret_str.length());
-            memcpy(ret, ret_str.c_str(), ret_str.length());
+            uv_write_t* req = new uv_write_t;
+            std::string body = "Hello, World!\n";
+            std::string header = getHttpHeader(200, status_code[200],
+                {
+                    {"Content-Type", "text/plain"},
+                    {"Content-Length", std::to_string(body.length())}
+                }
+            );
+            std::string response = header + "\r\n" + body;
+            char* ret = new char[response.length()];
+            memcpy(ret, response.c_str(), response.length());
             // uv_buf_t wrbuf = uv_buf_init(buf->base, nread);
-            uv_buf_t wrbuf = uv_buf_init(ret, ret_str.length());
-            uv_write(req, client, &wrbuf, 1, echo_write);
+            uv_buf_t wrbuf = uv_buf_init(ret, response.length());
+            req->data = ret;
+            uv_write(req, client, &wrbuf, 1, write_cb);
         }
 
         if (buf->base) {
-            free(buf->base);
+            delete buf->base;
         }
     }
 
